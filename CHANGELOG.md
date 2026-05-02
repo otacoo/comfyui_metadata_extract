@@ -1,3 +1,8 @@
+## v1.2.1
+*2026-05-02*
+
+- Prioritize UserComment/user_comment in WebP and JPEG images over Mode/Make metadata
+
 ## v1.2.0
 *2026-02-05*
 
