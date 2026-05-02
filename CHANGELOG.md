@@ -1,3 +1,8 @@
+## v1.2.2
+*2026-05-02*
+
+- Version update for Comfy, no changes
+
 ## v1.2.1
 *2026-05-02*
 
