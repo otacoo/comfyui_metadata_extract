@@ -1221,6 +1221,7 @@ function extractUserCommentFromJPEG(file) {
     getExifData(file, function (exifData) {
         console.log('EXIF DATA:', exifData);
         let userComment = getExifTag(exifData, "UserComment");
+        let modelComment = getExifTag(exifData, "Model") || exifData[272];
         let makeComment = getExifTag(exifData, "Make");
         let imageDescription = getExifTag(exifData, "ImageDescription") || exifData[0x010E] || exifData[270];
         let comment = null;
@@ -1228,6 +1229,9 @@ function extractUserCommentFromJPEG(file) {
         if (userComment && typeof userComment === 'string' && userComment.trim() !== '') {
             comment = userComment;
             sourceTag = 'UserComment';
+        } else if (modelComment && typeof modelComment === 'string' && modelComment.trim() !== '') {
+            comment = modelComment;
+            sourceTag = 'Model';
         } else if (makeComment && typeof makeComment === 'string' && makeComment.trim() !== '') {
             comment = makeComment;
             sourceTag = 'Make';
@@ -1266,18 +1270,26 @@ function extractUserCommentFromJPEG(file) {
 function extractUserCommentFromWebp(file) {
     getWebpExifData(file, function (exifData) {
         console.log('WEBP EXIF DATA:', exifData);
-        // Only consider "Make" (EXIF tag 271) for JSON parsing, skip ImageDescription (EXIF tag 270)
         let candidate = null;
         let sourceTag = null;
         if (exifData) {
-            // Try string key first
-            if (typeof exifData["Make"] === 'string' && exifData["Make"].trim()) {
-                candidate = exifData["Make"];
+            let userComment = getWebpExifTag(exifData, "UserComment") || exifData[37510];
+            let modelComment = getWebpExifTag(exifData, "Model") || exifData[272];
+            let makeComment = getWebpExifTag(exifData, "Make") || exifData[271];
+            let imageDesc = getWebpExifTag(exifData, "ImageDescription") || exifData[270];
+
+            if (userComment && typeof userComment === 'string' && userComment.trim() !== '') {
+                candidate = userComment;
+                sourceTag = 'UserComment';
+            } else if (modelComment && typeof modelComment === 'string' && modelComment.trim() !== '') {
+                candidate = modelComment;
+                sourceTag = 'Model';
+            } else if (makeComment && typeof makeComment === 'string' && makeComment.trim() !== '') {
+                candidate = makeComment;
                 sourceTag = 'Make';
-                // Fallback: try numeric key 271
-            } else if (typeof exifData[271] === 'string' && exifData[271].trim()) {
-                candidate = exifData[271];
-                sourceTag = '271';
+            } else if (imageDesc && typeof imageDesc === 'string' && imageDesc.trim() !== '') {
+                candidate = imageDesc;
+                sourceTag = 'ImageDescription';
             }
             window.setPromptInfoAvailable(true);
         }
