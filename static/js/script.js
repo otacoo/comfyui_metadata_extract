@@ -321,12 +321,19 @@ function distributePromptData(parsed, comment, sourceTag) {
         }
         // --- NovelAI v4/v5 JSON Handler (signed_hash+sampler or Software contains "NovelAI") ---
         if (!found && isNovelAI(parsed)) {
-            const positiveTexts = [];
-            if (parsed.prompt && typeof parsed.prompt === 'string') {
-                positiveTexts.push(parsed.prompt);
+            // NovelAI alpha channel embeds data under a "Comment" key
+            var naiData = parsed;
+            if (parsed.Comment && typeof parsed.Comment === 'object' && isNovelAIMetadata(parsed.Comment)) {
+                naiData = parsed.Comment;
             }
-            if (parsed.v4_prompt && parsed.v4_prompt.caption && Array.isArray(parsed.v4_prompt.caption.char_captions)) {
-                parsed.v4_prompt.caption.char_captions.forEach(charCap => {
+            const positiveTexts = [];
+            if (naiData.prompt && typeof naiData.prompt === 'string') {
+                positiveTexts.push(naiData.prompt);
+            } else if (parsed.Description && typeof parsed.Description === 'string') {
+                positiveTexts.push(parsed.Description);
+            }
+            if (naiData.v4_prompt && naiData.v4_prompt.caption && Array.isArray(naiData.v4_prompt.caption.char_captions)) {
+                naiData.v4_prompt.caption.char_captions.forEach(charCap => {
                     if (charCap.char_caption && charCap.char_caption.trim()) {
                         positiveTexts.push(charCap.char_caption);
                     }
@@ -334,10 +341,10 @@ function distributePromptData(parsed, comment, sourceTag) {
             }
 
             let negativeText = '';
-            if (parsed.uc && typeof parsed.uc === 'string') {
-                negativeText = parsed.uc;
-            } else if (parsed.v4_negative_prompt && parsed.v4_negative_prompt.caption && parsed.v4_negative_prompt.caption.base_caption) {
-                negativeText = parsed.v4_negative_prompt.caption.base_caption;
+            if (naiData.uc && typeof naiData.uc === 'string') {
+                negativeText = naiData.uc;
+            } else if (naiData.v4_negative_prompt && naiData.v4_negative_prompt.caption && naiData.v4_negative_prompt.caption.base_caption) {
+                negativeText = naiData.v4_negative_prompt.caption.base_caption;
             }
 
             setAndResize(positivePrompt, positiveTexts.map(unescapePromptString).join('\n\n'));
@@ -345,7 +352,7 @@ function distributePromptData(parsed, comment, sourceTag) {
 
             const additionalPromptsTextarea = document.getElementById('additional-prompts');
             if (additionalPromptsTextarea) {
-                setAndResize(additionalPromptsTextarea, ''); // Clear as it's handled above
+                setAndResize(additionalPromptsTextarea, '');
             }
 
             if (promptInfoList) promptInfoList.innerHTML = '';
@@ -1320,44 +1327,102 @@ function extractUserCommentFromWebp(file) {
 }
 
 // --- NovelAI Alpha Channel Metadata Extraction ---
+function hasImageAlpha(imageData) {
+    const data = imageData.data;
+    for (let i = 3; i < data.length; i += 4) {
+        if (data[i] < 255) return true;
+    }
+    return false;
+}
+
+function bitsToText(bits) {
+    const bytes = new Uint8Array(bits.match(/\d{8}/g).map(function(b) { return parseInt(b, 2); }));
+    return new TextDecoder().decode(bytes);
+}
+
+async function decompressZlibData(uint8data) {
+    if (typeof DecompressionStream === 'undefined') {
+        throw new Error('DecompressionStream not available');
+    }
+    // Stealth metadata uses gzip compression (Python's gzip.compress)
+    var options = [
+        { data: uint8data, format: 'gzip' },
+        { data: uint8data, format: 'deflate' }
+    ];
+    for (var o = 0; o < options.length; o++) {
+        try {
+            var stream = new Blob([options[o].data]).stream().pipeThrough(new DecompressionStream(options[o].format));
+            var reader = stream.getReader();
+            const chunks = [];
+            let total = 0;
+            while (true) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                chunks.push(chunk.value);
+                total += chunk.value.byteLength;
+            }
+            if (total === 0) continue;
+            const result = new Uint8Array(total);
+            let off = 0;
+            for (var i = 0; i < chunks.length; i++) {
+                result.set(chunks[i], off);
+                off += chunks[i].byteLength;
+            }
+            return decodeBytesToUtf8String(result);
+        } catch (e) {
+            console.warn('Decompression failed with format ' + options[o].format + ':', e.message);
+        }
+    }
+    throw new Error('All decompression methods failed');
+}
+
 function extractNovelAIAlphaMetadata(file, callback) {
     const reader = new FileReader();
     reader.onload = function(e) {
         const img = new Image();
-        img.onload = function() {
+        img.onload = async function() {
             try {
                 const canvas = document.createElement('canvas');
                 canvas.width = img.width;
                 canvas.height = img.height;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0);
-                
+
                 const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const pixels = imageData.data;
-                
-                // Extract LSB from alpha channel
-                let binaryString = '';
-                for (let i = 3; i < pixels.length; i += 4) {
-                    // Get the least significant bit of the alpha channel
-                    binaryString += (pixels[i] & 1).toString();
+
+                // 1. Try stealth pnginfo (signature-based protocol with optional compression)
+                var stealthResult = await readStealthPngInfo(imageData);
+                if (stealthResult) {
+                    console.log('Stealth metadata found:', stealthResult);
+                    var result = stealthResult;
+                    try {
+                        var parsed = JSON.parse(stealthResult);
+                        if (parsed.Comment) {
+                            try {
+                                parsed.Comment = JSON.parse(parsed.Comment);
+                                result = JSON.stringify(parsed, null, 2);
+                            } catch (e2) { /* ignore */ }
+                        }
+                    } catch (e1) { /* ignore */ }
+                    callback(result);
+                    return;
                 }
-                
-                // Convert binary string to text
-                const metadata = binaryStringToText(binaryString);
-                
-                if (metadata) {
-                    console.log('NovelAI alpha channel metadata found:', metadata);
-                    callback(metadata);
-                } else {
-                    callback(null);
+
+                // 2. Fall back to NovelAI-style: raw JSON in alpha channel LSB
+                var novelaiResult = readNovelAIAlphaFromPixels(imageData.data);
+                if (novelaiResult) {
+                    console.log('NovelAI alpha channel metadata found:', novelaiResult);
+                    callback(novelaiResult);
+                    return;
                 }
+
+                callback(null);
             } catch (err) {
-                console.error('Error extracting NovelAI alpha metadata:', err);
+                console.error('Error extracting alpha channel metadata:', err);
                 callback(null);
             }
         };
         img.onerror = function() {
-            console.error('Failed to load image for alpha channel extraction');
             callback(null);
         };
         img.src = e.target.result;
@@ -1368,33 +1433,36 @@ function extractNovelAIAlphaMetadata(file, callback) {
 /**
  * Convert binary string to text, stopping at null terminator or invalid data
  */
+function readNovelAIAlphaFromPixels(pixels) {
+    var binaryString = '';
+    for (var i = 3; i < pixels.length; i += 4) {
+        binaryString += (pixels[i] & 1).toString();
+    }
+    return binaryStringToText(binaryString);
+}
+
 function binaryStringToText(binaryString) {
-    let text = '';
-    let foundStart = false;
-    
-    // Process in 8-bit chunks
-    for (let i = 0; i < binaryString.length - 7; i += 8) {
-        const byte = binaryString.substr(i, 8);
-        const charCode = parseInt(byte, 2);
-        
-        // Stop at null terminator
+    var text = '';
+    var foundStart = false;
+
+    for (var i = 0; i < binaryString.length - 7; i += 8) {
+        var byte = binaryString.substr(i, 8);
+        var charCode = parseInt(byte, 2);
+
         if (charCode === 0) {
             if (foundStart) break;
             continue;
         }
-        
-        // Look for JSON start
-        if (charCode === 123) { // '{'
+
+        if (charCode === 123) {
             foundStart = true;
         }
-        
+
         if (foundStart) {
             text += String.fromCharCode(charCode);
         }
-        
-        // Stop if we've found a complete JSON object
-        if (foundStart && charCode === 125) { // '}'
-            // Try to parse to see if it's valid
+
+        if (foundStart && charCode === 125) {
             try {
                 JSON.parse(text);
                 break; // Valid JSON found, stop here
@@ -1408,7 +1476,124 @@ function binaryStringToText(binaryString) {
     if (text.trim().startsWith('{') && text.includes('"')) {
         return text.trim();
     }
-    
+
+    return null;
+}
+
+async function readStealthPngInfo(imageData) {
+    const width = imageData.width;
+    const height = imageData.height;
+    const data = imageData.data;
+    const hasAlpha = hasImageAlpha(imageData);
+
+    const SIG_LEN_BITS = 'stealth_pnginfo'.length * 8;
+
+    var mode = null;
+    var compressed = false;
+    var binaryData = '';
+    var bufferA = '';
+    var bufferRGB = '';
+    var indexA = 0;
+    var indexRGB = 0;
+    var sigConfirmed = false;
+    var confirmingSignature = true;
+    var readingParamLen = false;
+    var readingParam = false;
+    var readEnd = false;
+    var paramLen = 0;
+
+    for (var x = 0; x < width && !readEnd; x++) {
+        for (var y = 0; y < height && !readEnd; y++) {
+            var i = (y * width + x) * 4;
+
+            if (hasAlpha) {
+                bufferA += (data[i + 3] & 1).toString();
+                indexA++;
+            }
+            bufferRGB += (data[i] & 1).toString();
+            bufferRGB += (data[i + 1] & 1).toString();
+            bufferRGB += (data[i + 2] & 1).toString();
+            indexRGB += 3;
+
+            if (confirmingSignature) {
+                if (hasAlpha && indexA === SIG_LEN_BITS) {
+                    var decodedSigA = bitsToText(bufferA);
+                    if (decodedSigA === 'stealth_pnginfo' || decodedSigA === 'stealth_pngcomp') {
+                        confirmingSignature = false;
+                        sigConfirmed = true;
+                        readingParamLen = true;
+                        mode = 'alpha';
+                        if (decodedSigA === 'stealth_pngcomp') compressed = true;
+                        bufferA = '';
+                        indexA = 0;
+                    } else {
+                        readEnd = true;
+                        break;
+                    }
+                } else if (indexRGB === SIG_LEN_BITS) {
+                    var decodedSigRGB = bitsToText(bufferRGB);
+                    if (decodedSigRGB === 'stealth_rgbinfo' || decodedSigRGB === 'stealth_rgbcomp') {
+                        confirmingSignature = false;
+                        sigConfirmed = true;
+                        readingParamLen = true;
+                        mode = 'rgb';
+                        if (decodedSigRGB === 'stealth_rgbcomp') compressed = true;
+                        bufferRGB = '';
+                        indexRGB = 0;
+                    }
+                }
+            } else if (readingParamLen) {
+                if (mode === 'alpha' && indexA === 32) {
+                    paramLen = parseInt(bufferA, 2);
+                    readingParamLen = false;
+                    readingParam = true;
+                    bufferA = '';
+                    indexA = 0;
+                } else if (mode === 'rgb' && indexRGB === 33) {
+                    paramLen = parseInt(bufferRGB.slice(0, -1), 2);
+                    readingParamLen = false;
+                    readingParam = true;
+                    bufferRGB = bufferRGB.slice(-1);
+                    indexRGB = 1;
+                }
+            } else if (readingParam) {
+                if (mode === 'alpha' && indexA === paramLen) {
+                    binaryData = bufferA;
+                    readEnd = true;
+                    break;
+                } else if (mode === 'rgb' && indexRGB >= paramLen) {
+                    var diff = paramLen - indexRGB;
+                    if (diff < 0) {
+                        bufferRGB = bufferRGB.slice(0, diff);
+                    }
+                    binaryData = bufferRGB;
+                    readEnd = true;
+                    break;
+                }
+            } else {
+                readEnd = true;
+                break;
+            }
+        }
+    }
+
+    if (sigConfirmed && binaryData) {
+        var byteData = new Uint8Array(binaryData.match(/\d{8}/g).map(function(b) { return parseInt(b, 2); }));
+        var decoded;
+        if (compressed) {
+            try {
+                decoded = await decompressZlibData(byteData);
+            } catch (e) {
+                console.error('Stealth metadata decompression failed:', e);
+                decoded = decodeBytesToUtf8String(byteData);
+            }
+        } else {
+            decoded = new TextDecoder().decode(byteData);
+        }
+        console.log('Decoded stealth metadata:\n\n', decoded);
+        return decoded;
+    }
+
     return null;
 }
 
