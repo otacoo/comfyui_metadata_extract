@@ -86,7 +86,7 @@ function setAndResize(textarea, value) {
 // --- Helper: Strip "Prompt:" or "Workflow:" prefix ---
 function stripPromptPrefix(str) {
     if (typeof str !== 'string') return str;
-    return str.replace(/^(Prompt:|Workflow:)/, '').trim();
+    return str.replace(/^(prompt:|workflow:)/i, '').trim();
 }
 
 // --- Helper: Determine if a key should go to model-info-list, skip ComfyUI noise ---
@@ -154,11 +154,13 @@ function extractCivitAIMetadata(parsed) {
 function isComfyUIGraph(parsed) {
     if (!parsed || typeof parsed !== 'object') return false;
     if (parsed.generation_data) return true;
-    var p = parsed.prompt;
-    return !!(p && typeof p === 'object' && Object.keys(p).some(function (k) {
-        var n = p[k];
-        return n && typeof n === 'object' && n.class_type;
-    }));
+    function hasClassTypeNodes(obj) {
+        return !!(obj && typeof obj === 'object' && Object.keys(obj).some(function (k) {
+            var n = obj[k];
+            return n && typeof n === 'object' && n.class_type;
+        }));
+    }
+    return hasClassTypeNodes(parsed.prompt) || hasClassTypeNodes(parsed);
 }
 
 // --- ComfyUI: prompt graph (class_type nodes) or generation_data ---
@@ -213,35 +215,44 @@ function extractComfyUIMetadata(parsed) {
             }
         }
         const p = parsed.prompt;
+        var graph = null;
         if (p && typeof p === 'object') {
-            const hasClassType = Object.keys(p).some(function (k) {
-                const n = p[k];
+            var ctc = Object.keys(p).some(function (k) {
+                var n = p[k];
                 return n && typeof n === 'object' && n.class_type;
             });
-            if (hasClassType) {
-                const re = /cliptextencode|wildcard|textboxmira|eff\. loader|ttn text/i;
-                const posFields = ['text', 'positive', 'wildcard_text', 'clip_l', 't5xxl', 'string_a', 'string_b'];
-                const negFields = ['text', 'negative', 'wildcard_text'];
-                const positiveArr = getNodesValues(p, re, posFields, true);
-                const negativeArr = getNodesValues(p, re, negFields, false);
-                const prompt = positiveArr.join('\n');
-                const negative = negativeArr.join('\n');
-                const extra = [];
-                const steps = getFirst(p, /scheduler|sampler/i, ['steps']);
-                const sampler = getFirst(p, /scheduler|sampler/i, ['sampler_name']);
-                const cfg = getFirst(p, /guidance|sampler|cliptextencode/i, ['guidance', 'cfg']);
-                const seed = getFirst(p, /randomnoise|sampler|seed/i, ['noise_seed', 'seed']);
-                const w = getFirst(p, /latentimage|loader/i, ['width', 'empty_latent_width']);
-                const h = getFirst(p, /latentimage|loader/i, ['height', 'empty_latent_height']);
-                const model = getFirst(p, /checkpoint|loader/i, ['ckpt_name', 'base_ckpt_name', 'unet_name']);
-                if (steps != null) extra.push('Steps: ' + steps);
-                if (sampler) extra.push('Sampler: ' + sampler);
-                if (cfg != null) extra.push('CFG scale: ' + cfg);
-                if (seed != null) extra.push('Seed: ' + seed);
-                if (w != null && h != null) extra.push('Size: ' + w + 'x' + h);
-                if (model) extra.push('Model: ' + model);
-                return { prompt, negative, extra: extra.join(', ') };
-            }
+            if (ctc) graph = p;
+        }
+        if (!graph && typeof parsed === 'object') {
+            var ctc2 = Object.keys(parsed).some(function (k) {
+                var n = parsed[k];
+                return n && typeof n === 'object' && n.class_type;
+            });
+            if (ctc2) graph = parsed;
+        }
+        if (graph) {
+            const re = /cliptextencode|wildcard|textboxmira|eff\. loader|ttn text/i;
+            const posFields = ['text', 'positive', 'wildcard_text', 'clip_l', 't5xxl', 'string_a', 'string_b'];
+            const negFields = ['text', 'negative', 'wildcard_text'];
+            const positiveArr = getNodesValues(graph, re, posFields, true);
+            const negativeArr = getNodesValues(graph, re, negFields, false);
+            const prompt = positiveArr.join('\n');
+            const negative = negativeArr.join('\n');
+            const extra = [];
+            const steps = getFirst(graph, /scheduler|sampler/i, ['steps']);
+            const sampler = getFirst(graph, /scheduler|sampler/i, ['sampler_name']);
+            const cfg = getFirst(graph, /guidance|sampler|cliptextencode/i, ['guidance', 'cfg']);
+            const seed = getFirst(graph, /randomnoise|sampler|seed/i, ['noise_seed', 'seed']);
+            const w = getFirst(graph, /latentimage|loader/i, ['width', 'empty_latent_width']);
+            const h = getFirst(graph, /latentimage|loader/i, ['height', 'empty_latent_height']);
+            const model = getFirst(graph, /checkpoint|loader/i, ['ckpt_name', 'base_ckpt_name', 'unet_name']);
+            if (steps != null) extra.push('Steps: ' + steps);
+            if (sampler) extra.push('Sampler: ' + sampler);
+            if (cfg != null) extra.push('CFG scale: ' + cfg);
+            if (seed != null) extra.push('Seed: ' + seed);
+            if (w != null && h != null) extra.push('Size: ' + w + 'x' + h);
+            if (model) extra.push('Model: ' + model);
+            return { prompt, negative, extra: extra.join(', ') };
         }
     } catch (e) {
         console.warn('ComfyUI extraction failed:', e);
@@ -301,6 +312,7 @@ function distributePromptData(parsed, comment, sourceTag) {
     if (!found && parsed && typeof parsed === 'object') {
         // --- ComfyUI (prompt/graph or generation_data) ---
         if (isComfyUIGraph(parsed)) {
+            found = true;
             var comfy = extractComfyUIMetadata(parsed);
             if (comfy) {
                 setAndResize(positivePrompt, unescapePromptString(comfy.prompt));
@@ -315,136 +327,143 @@ function distributePromptData(parsed, comment, sourceTag) {
                 var extraMetadataResources = [];
                 collectExtraMetadataResources(parsed, extraMetadataResources);
                 addCivitaiResourcesToModelInfo(extraMetadataResources);
+            } else {
+                addMetadataAsJsonBlock(parsed, promptInfoList, 'ComfyUI', sourceTag);
+                walkForModelInfo(parsed, function (k, v) { addModelInfoItem(k, v); });
+                var extraMetadataResources2 = [];
+                collectExtraMetadataResources(parsed, extraMetadataResources2);
+                addCivitaiResourcesToModelInfo(extraMetadataResources2);
+            }
+            setGenerationMetadataType('ComfyUI');
+            clearWarning();
+        }
+        // --- NovelAI / InvokeAI / Generic handlers ---
+        if (!found) {
+            if (isNovelAI(parsed)) {
+                // NovelAI alpha channel embeds data under a "Comment" key
+                var naiData = parsed;
+                if (parsed.Comment && typeof parsed.Comment === 'object' && isNovelAIMetadata(parsed.Comment)) {
+                    naiData = parsed.Comment;
+                }
+                const positiveTexts = [];
+                if (naiData.prompt && typeof naiData.prompt === 'string') {
+                    positiveTexts.push(naiData.prompt);
+                } else if (parsed.Description && typeof parsed.Description === 'string') {
+                    positiveTexts.push(parsed.Description);
+                }
+                if (naiData.v4_prompt && naiData.v4_prompt.caption && Array.isArray(naiData.v4_prompt.caption.char_captions)) {
+                    naiData.v4_prompt.caption.char_captions.forEach(charCap => {
+                        if (charCap.char_caption && charCap.char_caption.trim()) {
+                            positiveTexts.push(charCap.char_caption);
+                        }
+                    });
+                }
+
+                let negativeText = '';
+                if (naiData.uc && typeof naiData.uc === 'string') {
+                    negativeText = naiData.uc;
+                } else if (naiData.v4_negative_prompt && naiData.v4_negative_prompt.caption && naiData.v4_negative_prompt.caption.base_caption) {
+                    negativeText = naiData.v4_negative_prompt.caption.base_caption;
+                }
+
+                setAndResize(positivePrompt, positiveTexts.map(unescapePromptString).join('\n\n'));
+                setAndResize(negativePrompt, unescapePromptString(negativeText));
+
+                const additionalPromptsTextarea = document.getElementById('additional-prompts');
+                if (additionalPromptsTextarea) {
+                    setAndResize(additionalPromptsTextarea, '');
+                }
+
+                if (promptInfoList) promptInfoList.innerHTML = '';
+                if (modelInfoList) modelInfoList.innerHTML = '';
+
+                const infoData = { ...parsed };
+                delete infoData.prompt;
+                delete infoData.uc;
+                delete infoData.v4_prompt;
+                delete infoData.v4_negative_prompt;
+
+                collectPromptInfo(infoData, function (key, value) {
+                    if (!isModelInfoKey(key, value)) addMetadataItem(key, value, promptInfoList);
+                }, function (key, value) {
+                    if (isModelInfoKey(key, value)) addModelInfoItem(key, value);
+                });
+                walkForModelInfo(parsed, addModelInfoItem);
+                setGenerationMetadataType('NovelAI');
+                clearWarning();
+                found = true;
+            } else if (isInvokeAIKeyword(sourceTag)) {
+                // --- InvokeAI (detected by PNG/WebP chunk keyword invokeai_metadata or invokeai_graph) ---
+                var meta = getValueIgnoreCase(parsed, 'invokeai_metadata');
+                if (meta == null || typeof meta !== 'object') meta = parsed;
+                var positiveParts = [];
+                if (typeof meta.positive_prompt === 'string' && meta.positive_prompt.trim()) {
+                    positiveParts.push(meta.positive_prompt);
+                }
+                var valueStr = meta.value !== undefined ? meta.value : meta.Value;
+                if (typeof valueStr === 'string' && valueStr.trim()) {
+                    positiveParts.push(valueStr);
+                }
+                var positiveText = positiveParts.map(unescapePromptString).join('\n\n');
+                var negativeText = typeof meta.negative_prompt === 'string' ? meta.negative_prompt : '';
+                setAndResize(positivePrompt, positiveText);
+                setAndResize(negativePrompt, unescapePromptString(negativeText));
+                var additionalPromptsTextarea = document.getElementById('additional-prompts');
+                if (additionalPromptsTextarea) setAndResize(additionalPromptsTextarea, '');
+                if (promptInfoList) promptInfoList.innerHTML = '';
+                if (modelInfoList) modelInfoList.innerHTML = '';
+                addMetadataAsJsonBlock(parsed, promptInfoList, 'InvokeAI', sourceTag);
+                walkForModelInfo(meta, function (k, v) { addModelInfoItem(k, v); });
+                setGenerationMetadataType('InvokeAI');
+                clearWarning();
+                found = true;
+            } else {
+                // --- ComfyUI (generic JSON handler) ---
+                // 1. Collect all "text" values (recursively) for positive and negative prompts
+                const positiveTexts = [];
+                const negativeTexts = [];
+                collectTextValuesWithNegatives(parsed, positiveTexts, negativeTexts);
+
+                // 2. Find wildcard_text, extraMetadata (prompt only), and extraMetadata.resources for Models
+                const wildcardTexts = [];
+                collectAllKeyValues(parsed, 'wildcard_text', wildcardTexts);
+                const extraMetadataPrompts = [];
+                const extraMetadataResources = [];
+                collectExtraMetadataPromptOnly(parsed, extraMetadataPrompts);
+                collectExtraMetadataResources(parsed, extraMetadataResources);
+
+                // Process extraMetadataPrompts: negative -> negativeTexts, prompt -> positive prompt (not additional)
+                for (let i = 0; i < extraMetadataPrompts.length; i++) {
+                    const prompt = extraMetadataPrompts[i];
+                    if (typeof prompt === 'string' && prompt.startsWith('__NEGATIVE__')) {
+                        negativeTexts.push(prompt.substring('__NEGATIVE__'.length));
+                        extraMetadataPrompts.splice(i, 1);
+                        i--;
+                    }
+                }
+                // extraMetadata "prompt" goes to positive prompt (e.g. JPEG UserComment / CivitAI)
+                extraMetadataPrompts.forEach(function (p) {
+                    if (typeof p === 'string' && p.trim()) positiveTexts.push(p);
+                });
+
+                setAndResize(positivePrompt, positiveTexts.map(unescapePromptString).join('\n'));
+                setAndResize(negativePrompt, negativeTexts.map(unescapePromptString).join('\n'));
+
+                const additionalPromptsTextarea = document.getElementById('additional-prompts');
+                if (additionalPromptsTextarea) {
+                    setAndResize(additionalPromptsTextarea, wildcardTexts.join('\n'));
+                }
+
+                // 3. Additional Info as JSON block; Models from walkForModelInfo + extraMetadata.resources (Civitai version IDs)
+                if (promptInfoList) promptInfoList.innerHTML = '';
+                if (modelInfoList) modelInfoList.innerHTML = '';
+                addMetadataAsJsonBlock(parsed, promptInfoList, 'ComfyUI', sourceTag);
+                walkForModelInfo(parsed, function (k, v) { addModelInfoItem(k, v); });
+                addCivitaiResourcesToModelInfo(extraMetadataResources);
                 setGenerationMetadataType('ComfyUI');
                 clearWarning();
                 found = true;
             }
-        }
-        // --- NovelAI v4/v5 JSON Handler (signed_hash+sampler or Software contains "NovelAI") ---
-        if (!found && isNovelAI(parsed)) {
-            // NovelAI alpha channel embeds data under a "Comment" key
-            var naiData = parsed;
-            if (parsed.Comment && typeof parsed.Comment === 'object' && isNovelAIMetadata(parsed.Comment)) {
-                naiData = parsed.Comment;
-            }
-            const positiveTexts = [];
-            if (naiData.prompt && typeof naiData.prompt === 'string') {
-                positiveTexts.push(naiData.prompt);
-            } else if (parsed.Description && typeof parsed.Description === 'string') {
-                positiveTexts.push(parsed.Description);
-            }
-            if (naiData.v4_prompt && naiData.v4_prompt.caption && Array.isArray(naiData.v4_prompt.caption.char_captions)) {
-                naiData.v4_prompt.caption.char_captions.forEach(charCap => {
-                    if (charCap.char_caption && charCap.char_caption.trim()) {
-                        positiveTexts.push(charCap.char_caption);
-                    }
-                });
-            }
-
-            let negativeText = '';
-            if (naiData.uc && typeof naiData.uc === 'string') {
-                negativeText = naiData.uc;
-            } else if (naiData.v4_negative_prompt && naiData.v4_negative_prompt.caption && naiData.v4_negative_prompt.caption.base_caption) {
-                negativeText = naiData.v4_negative_prompt.caption.base_caption;
-            }
-
-            setAndResize(positivePrompt, positiveTexts.map(unescapePromptString).join('\n\n'));
-            setAndResize(negativePrompt, unescapePromptString(negativeText));
-
-            const additionalPromptsTextarea = document.getElementById('additional-prompts');
-            if (additionalPromptsTextarea) {
-                setAndResize(additionalPromptsTextarea, '');
-            }
-
-            if (promptInfoList) promptInfoList.innerHTML = '';
-            if (modelInfoList) modelInfoList.innerHTML = '';
-
-            const infoData = { ...parsed };
-            delete infoData.prompt;
-            delete infoData.uc;
-            delete infoData.v4_prompt;
-            delete infoData.v4_negative_prompt;
-
-            collectPromptInfo(infoData, function (key, value) {
-                if (!isModelInfoKey(key, value)) addMetadataItem(key, value, promptInfoList);
-            }, function (key, value) {
-                if (isModelInfoKey(key, value)) addModelInfoItem(key, value);
-            });
-            walkForModelInfo(parsed, addModelInfoItem);
-            setGenerationMetadataType('NovelAI');
-            clearWarning();
-            found = true;
-        } else if (isInvokeAIKeyword(sourceTag)) {
-            // --- InvokeAI (detected by PNG/WebP chunk keyword invokeai_metadata or invokeai_graph) ---
-            var meta = getValueIgnoreCase(parsed, 'invokeai_metadata');
-            if (meta == null || typeof meta !== 'object') meta = parsed;
-            var positiveParts = [];
-            if (typeof meta.positive_prompt === 'string' && meta.positive_prompt.trim()) {
-                positiveParts.push(meta.positive_prompt);
-            }
-            var valueStr = meta.value !== undefined ? meta.value : meta.Value;
-            if (typeof valueStr === 'string' && valueStr.trim()) {
-                positiveParts.push(valueStr);
-            }
-            var positiveText = positiveParts.map(unescapePromptString).join('\n\n');
-            var negativeText = typeof meta.negative_prompt === 'string' ? meta.negative_prompt : '';
-            setAndResize(positivePrompt, positiveText);
-            setAndResize(negativePrompt, unescapePromptString(negativeText));
-            var additionalPromptsTextarea = document.getElementById('additional-prompts');
-            if (additionalPromptsTextarea) setAndResize(additionalPromptsTextarea, '');
-            if (promptInfoList) promptInfoList.innerHTML = '';
-            if (modelInfoList) modelInfoList.innerHTML = '';
-            addMetadataAsJsonBlock(parsed, promptInfoList, 'InvokeAI', sourceTag);
-            walkForModelInfo(meta, function (k, v) { addModelInfoItem(k, v); });
-            setGenerationMetadataType('InvokeAI');
-            clearWarning();
-            found = true;
-        } else {
-            // --- ComfyUI (generic JSON handler) ---
-            // 1. Collect all "text" values (recursively) for positive and negative prompts
-            const positiveTexts = [];
-            const negativeTexts = [];
-            collectTextValuesWithNegatives(parsed, positiveTexts, negativeTexts);
-
-            // 2. Find wildcard_text, extraMetadata (prompt only), and extraMetadata.resources for Models
-            const wildcardTexts = [];
-            collectAllKeyValues(parsed, 'wildcard_text', wildcardTexts);
-            const extraMetadataPrompts = [];
-            const extraMetadataResources = [];
-            collectExtraMetadataPromptOnly(parsed, extraMetadataPrompts);
-            collectExtraMetadataResources(parsed, extraMetadataResources);
-
-            // Process extraMetadataPrompts: negative -> negativeTexts, prompt -> positive prompt (not additional)
-            for (let i = 0; i < extraMetadataPrompts.length; i++) {
-                const prompt = extraMetadataPrompts[i];
-                if (typeof prompt === 'string' && prompt.startsWith('__NEGATIVE__')) {
-                    negativeTexts.push(prompt.substring('__NEGATIVE__'.length));
-                    extraMetadataPrompts.splice(i, 1);
-                    i--;
-                }
-            }
-            // extraMetadata "prompt" goes to positive prompt (e.g. JPEG UserComment / CivitAI)
-            extraMetadataPrompts.forEach(function (p) {
-                if (typeof p === 'string' && p.trim()) positiveTexts.push(p);
-            });
-
-            setAndResize(positivePrompt, positiveTexts.map(unescapePromptString).join('\n'));
-            setAndResize(negativePrompt, negativeTexts.map(unescapePromptString).join('\n'));
-
-            const additionalPromptsTextarea = document.getElementById('additional-prompts');
-            if (additionalPromptsTextarea) {
-                setAndResize(additionalPromptsTextarea, wildcardTexts.join('\n'));
-            }
-
-            // 3. Additional Info as JSON block; Models from walkForModelInfo + extraMetadata.resources (Civitai version IDs)
-            if (promptInfoList) promptInfoList.innerHTML = '';
-            if (modelInfoList) modelInfoList.innerHTML = '';
-            addMetadataAsJsonBlock(parsed, promptInfoList, 'ComfyUI', sourceTag);
-            walkForModelInfo(parsed, function (k, v) { addModelInfoItem(k, v); });
-            addCivitaiResourcesToModelInfo(extraMetadataResources);
-            setGenerationMetadataType('ComfyUI');
-            clearWarning();
-            found = true;
         }
     }
     if (!found && comment && comment.trim()) {
