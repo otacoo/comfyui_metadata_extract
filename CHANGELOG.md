@@ -1,3 +1,10 @@
+## v1.2.3
+*2026-08-03*
+
+- Improve parsing of certain ComfyUI metadata
+- Improve detection of stealth PNG metadata that uses gzip
+- unet models should be correctly added to the models area
+
 ## v1.2.2
 *2026-05-02*
 
