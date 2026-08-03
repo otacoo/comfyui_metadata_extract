@@ -113,10 +113,11 @@ function isModelInfoKey(key, value) {
         return false;
     }
 
-    // Only allow: lora name, lora hashes, model/checkpoint name, model/ckpt hash, vae name, vae hash
+    // Only allow: lora name, lora hashes, model/checkpoint name, model/ckpt hash, vae name, vae hash, unet
     const modelKeys = [
         'ckpt', 'ckpt_name', 'checkpoint', 'model', 'modelname', 'lora', 'lora_name', 'loraname',
-        'lorahashes', 'modelhash', 'model_hash', 'ckpt_hash', 'hash', 'vae', 'vae_name', 'vaename', 'vae_hash', 'vaehash'
+        'lorahashes', 'modelhash', 'model_hash', 'ckpt_hash', 'hash', 'vae', 'vae_name', 'vaename', 'vae_hash', 'vaehash',
+        'unet', 'unet_name', 'base_ckpt_name'
     ];
     return (
         modelKeys.includes(normalized) ||
